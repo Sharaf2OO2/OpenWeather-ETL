@@ -1,7 +1,9 @@
 from airflow import DAG
 from datetime import datetime, timedelta
 from airflow.providers.http.sensors.http import HttpSensor
-import json
+from airflow.providers.http.operators.http import SimpleHttpOperator
+from airflow.operators.python import PythonOperator
+import json, pandas as pd, os
 
 default_args = {
     'owner': 'Sharaf',
@@ -13,6 +15,48 @@ default_args = {
     'retry_delay': timedelta(minutes=2),
 }
 
+def kelvin_to_fahrenheit(kelvin_temp):
+    return round((kelvin_temp - 273.15) * 9/5 + 32, 2)
+
+def transform_loaded_data(task_instance):
+    data = task_instance.xcom_pull(task_ids='extract_weather_data')
+    city = data['name']
+    weather_description = data['weather'][-1]['description']
+    temp_fahrenheit = kelvin_to_fahrenheit(data['main']['temp'])
+    feels_like_fahrenheit = kelvin_to_fahrenheit(data['main']['feels_like'])
+    min_temp_fahrenheit = kelvin_to_fahrenheit(data['main']['temp_min'])
+    max_temp_fahrenheit = kelvin_to_fahrenheit(data['main']['temp_max'])
+    pressure = data['main']['pressure']
+    humidity = data['main']['humidity']
+    wind_speed = data['wind']['speed']
+    time_of_record = datetime.utcfromtimestamp(data['dt'] + data['timezone'])
+    sunrise_time = datetime.utcfromtimestamp(data['sys']['sunrise'] + data['timezone'])
+    sunset_time = datetime.utcfromtimestamp(data['sys']['sunset'] + data['timezone'])
+
+    transformed_data = {
+                'City': city,
+                'Description': weather_description,
+                'Temprature (F)': temp_fahrenheit,
+                'Feels Like (F)': feels_like_fahrenheit,
+                'Minimum Temprature (F)': min_temp_fahrenheit,
+                'Maximum Temprature (F)': max_temp_fahrenheit,
+                'Pressure': pressure,
+                'Humidity': humidity,
+                'Wind Speed': wind_speed,
+                'Time of Record': time_of_record,
+                'Sunrise (Local Time)': sunrise_time,
+                'Sunset (Local Time)': sunset_time
+    }
+
+    df_data = pd.DataFrame([transformed_data])
+
+    now = datetime.now()
+    dt_string = now.strftime("%d-%m-%Y_%H-%M-%S")
+    dt_string = 'Current_Weather_Data_Luxor_' + dt_string
+    df_data.to_csv(f'{dt_string}.csv', index=False)
+
+   
+
 with DAG('weather_dag',
             default_args=default_args,
             description='A simple weather DAG',
@@ -22,5 +66,22 @@ with DAG('weather_dag',
             is_weather_available = HttpSensor(
                     task_id='is_weather_available',
                     http_conn_id='openweather_api',
-                    endpoint='/data/2.5/weather?q=Luxor&appid=36907b823b85ecf2a3bf5630d2be0284'
+                    endpoint='/data/2.5/weather?q=Luxor&appid=5add628cbaf526e01cd7d8610492317b'
                     )
+            
+            extract_weather_data = SimpleHttpOperator(
+                    task_id='extract_weather_data',
+                    http_conn_id='openweather_api',
+                    method='GET',
+                    endpoint='/data/2.5/weather?q=Luxor&appid=5add628cbaf526e01cd7d8610492317b',
+                    response_filter=lambda response: json.loads(response.text),
+                    log_response=True
+                    )
+
+            transform_weather_data = PythonOperator(
+                    task_id='transform_weather_data',
+                    python_callable=transform_loaded_data
+                    )
+
+            is_weather_available >> extract_weather_data >> transform_weather_data
+                 
